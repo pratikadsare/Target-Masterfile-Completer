@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Target Masterfile Completer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .app-container { max-width: 900px; margin: 2rem auto; padding: 2rem; }
+    .file-drop-zone { border: 2px dashed #cbd5e1; transition: all 0.3s ease; }
+    .file-drop-zone.dragover { border-color: #3b82f6; background-color: #eff6ff; }
+    .btn-primary { background-color: #2563eb; color: white; transition: background-color 0.3s ease; }
+    .btn-primary:hover { background-color: #1d4ed8; }
+    .btn-primary:disabled { background-color: #9ca3af; cursor: not-allowed; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+  <div class="app-container bg-white rounded-xl shadow-lg">
+    <header class="text-center mb-8">
+      <h1 class="text-3xl font-bold text-slate-900">Target Masterfile Completer</h1>
+      <p class="text-slate-500 mt-2">Automate attribute filling in Target listing files.</p>
+    </header>
+
+    <main>
+      <!-- Step 1 -->
+      <div class="mb-6 p-4 border border-slate-200 rounded-lg">
+        <h2 class="text-lg font-semibold mb-3 text-slate-700">1. Select Category & Attributes</h2>
+        <div class="grid grid-cols-1 gap-4">
+          <div>
+            <label for="category" class="block text-sm font-medium text-slate-600 mb-1">Category</label>
+            <select id="category" class="w-full p-2 border border-slate-300 rounded-md shadow-sm">
+              <option value="dietary">Dietary Supplement</option>
+              <option value="vitamins">Vitamins</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-600 mb-1">Attributes to Fill</label>
+            <div class="space-y-2">
+              <label class="flex items-center space-x-2"><input type="checkbox" value="subtype"> <span>Health and Beauty Subtype*</span></label>
+              <label class="flex items-center space-x-2"><input type="checkbox" value="gender"> <span>Gender*</span></label>
+              <label class="flex items-center space-x-2"><input type="checkbox" value="application"> <span>Health Application*</span></label>
+              <label class="flex items-center space-x-2"><input type="checkbox" value="form"> <span>Product Form*</span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="mb-6 p-4 border border-slate-200 rounded-lg">
+        <h2 class="text-lg font-semibold mb-3 text-slate-700">2. Upload Excel File with Data</h2>
+        <div id="dropZone" class="file-drop-zone rounded-lg p-8 text-center cursor-pointer">
+          <p id="dropZoneText" class="text-slate-500">Drag & drop your Excel file here (.xlsx, .xlsm, .xlsb, .xls), or click to select a file.</p>
+          <input type="file" id="fileInput" class="hidden" accept=".xlsx,.xlsm,.xlsb,.xls">
+          <p id="fileName" class="mt-2 font-medium text-blue-600"></p>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="text-center">
+        <button id="generateBtn" class="w-full md:w-1/2 btn-primary font-bold py-3 px-4 rounded-lg shadow-md disabled:opacity-50" disabled>
+          Generate Filled File
+        </button>
+      </div>
+
+      <!-- Status -->
+      <div id="status" class="mt-6 text-center text-sm font-medium"></div>
+
+      <!-- Instructions -->
+      <div class="mt-10 p-4 border border-slate-200 rounded-lg bg-slate-50">
+        <h2 class="text-lg font-semibold mb-3 text-slate-700">File Format Instructions</h2>
+        <ul class="list-disc list-inside text-slate-600 text-sm space-y-1">
+          <li>Sheet name must be <strong>data</strong></li>
+          <li>Row 1 = headers</li>
+          <li>Column 1: SKU</li>
+          <li>Column 2: Title</li>
+          <li>Column 3–7: Bullet Points (1–5)</li>
+          <li>Column 8: Product Description</li>
+          <li>Column 9: (keep blank)</li>
+          <li>Column 10 onward: attributes filled from selected checkboxes</li>
+        </ul>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // --- Keyword maps for both categories ---
+    const kw = {
+      dietary: {
+        subtype: [
+          { terms: ['fiber','psyllium','inulin'], value: 'Fiber Supplements' },
+          { terms: ['green','superfood','spirulina','chlorella','wheatgrass'], value: 'Greens and Superfood Supplements' },
+          { terms: ['herb','herbal','ashwagandha','turmeric','ginseng','echinacea','milk thistle','valerian','fenugreek','ginger','garlic'], value: 'Herbal Supplements' },
+          { terms: ['magnesium','zinc','iron','calcium','potassium','selenium','iodine','chromium','copper','manganese'], value: 'Mineral Supplements' },
+          { terms: ['supplement','dietary'], value: 'Dietary Supplements' }
+        ],
+      },
+      vitamins: {
+        subtype: [
+          { terms: ['multivitamin'], value: 'Multivitamins' },
+          { terms: ['vitamin a','retinol'], value: 'Vitamin A' },
+          { terms: ['vitamin b','b complex','b12','folate','niacin'], value: 'Vitamin B' },
+          { terms: ['vitamin c','ascorbic'], value: 'Vitamin C' },
+          { terms: ['vitamin d','d3','d2'], value: 'Vitamin D' },
+          { terms: ['vitamin e','tocopherol'], value: 'Vitamin E' },
+          { terms: ['vitamin k'], value: 'Vitamin K' }
+        ]
+      },
+      common: {
+        gender: [
+          { terms: ["men's", 'for men', 'for him', 'male'], value: 'Men' },
+          { terms: ["women's", 'for women', 'for her', 'female'], value: 'Women' }
+        ],
+        application: [
+          { terms: ['adrenal'], value: 'Adrenal Health' },
+          { terms: ['aging','anti-aging','anti aging'], value: 'Aging' },
+          { terms: ['allergy','allergies','hay fever'], value: 'Allergies' },
+          { terms: ['anxiety','anxious'], value: 'Anxiety' },
+          { terms: ['bloat','bloating'], value: 'Bloating' },
+          { terms: ['blood sugar','glycemic','glucose'], value: 'Blood Sugar Imbalance' },
+          { terms: ['bone','osteoporosis','calcium'], value: 'Bone Health' },
+          { terms: ['child','kids','children'], value: "Children's Health" },
+          { terms: ['cholesterol'], value: 'Cholesterol Level Maintenance' },
+          { terms: ['digest','digestion','probiotic','prebiotic','gut'], value: 'Digestive Health' },
+          { terms: ['energy','energiz'], value: 'Energy' },
+          { terms: ['eye','vision','lutein','zeaxanthin'], value: 'Eye Health' },
+          { terms: ['hair','skin','nail','collagen','biotin'], value: 'Hair, Skin and Nail Health' },
+          { terms: ['heart','cardio','omega-3','omega 3'], value: 'Heart Health' },
+          { terms: ['immune','immunity','elderberry','vitamin c'], value: 'Immune System Health' },
+          { terms: ['inflammation','curcumin','turmeric'], value: 'Inflammation' },
+          { terms: ['insomnia','sleep','melatonin'], value: 'Insomnia' },
+          { terms: ['liver','silymarin'], value: 'Liver Health' },
+          { terms: ['memory','brain','focus','nootropic'], value: 'Memory and Brain Health' },
+          { terms: ['metabolism','thermogenic'], value: 'Metabolism' },
+          { terms: ['mood','serotonin','5-htp'], value: 'Mood' },
+          { terms: ['muscle'], value: 'Muscle Growth' },
+          { terms: ['overall','daily multivitamin'], value: 'Overall Health' },
+          { terms: ['pain relief','analgesic'], value: 'Pain Relief' },
+          { terms: ['pregnan','prenatal','folic acid'], value: 'Pregnancy' },
+          { terms: ['prostate','saw palmetto'], value: 'Prostate Health' },
+          { terms: ['respiratory','lung'], value: 'Respiratory Health' },
+          { terms: ['skin','dermat'], value: 'Skin Health' },
+          { terms: ['stress','ashwagandha','rhodiola'], value: 'Stress' },
+          { terms: ['thyroid'], value: 'Thyroid Health' },
+          { terms: ['urinary'], value: 'Urinary Health' },
+          { terms: ['vaginal'], value: 'Vaginal Health' },
+          { terms: ['weight loss','fat burner'], value: 'Weight Loss' },
+          { terms: ['weight management'], value: 'Weight Management' },
+          { terms: ['women','female'], value: "Women's Health" },
+          { terms: ['yeast','candida'], value: 'Yeast Infection' }
+        ],
+        form: [
+          { terms: ['gummi','gummies','gummy'], value: 'Gummy' },
+          { terms: ['softgel','soft gel'], value: 'Softgel' },
+          { terms: ['capsule','caps'], value: 'Capsule' },
+          { terms: ['tablet','tab'], value: 'Tablet' },
+          { terms: ['chewable'], value: 'Chewable' },
+          { terms: ['gelcap','gel cap'], value: 'Gelcap' },
+          { terms: ['caplet'], value: 'Caplet' },
+          { terms: ['powder','powdered'], value: 'Powder' },
+          { terms: ['liquid','syrup','drops','tincture'], value: 'Liquid' },
+          { terms: ['cream','topical'], value: 'Cream' },
+          { terms: ['patch'], value: 'Patch' },
+          { terms: ['lozenge'], value: 'Lozenge' },
+          { terms: ['tea'], value: 'Tea' },
+          { terms: ['bar'], value: 'Bar' },
+          { terms: ['gum'], value: 'Gum' },
+          { terms: ['lollipop'], value: 'Lollipop' }
+        ]
+      }
+    };
+
+    const defaults = {
+      dietary: { subtype: "Dietary Supplements", gender: "Gender Neutral", application: "Overall Health", form: "Capsule" },
+      vitamins: { subtype: "Multivitamins", gender: "Gender Neutral", application: "Overall Health", form: "Tablet" }
+    };
+
+    // --- DOM elements ---
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const fileName = document.getElementById("fileName");
+    const generateBtn = document.getElementById("generateBtn");
+    const statusEl = document.getElementById("status");
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", e => { e.preventDefault(); dropZone.classList.remove("dragover"); handleFile(e.dataTransfer.files[0]); });
+    fileInput.addEventListener("change", e => handleFile(e.target.files[0]));
+
+    let workbook, uploadedFileName, uploadedExt;
+    function handleFile(file) {
+      if (!file) return;
+      uploadedFileName = file.name.split(".")[0];
+      uploadedExt = file.name.split(".").pop().toLowerCase();
+      const reader = new FileReader();
+      reader.onload = e => {
+        const data = new Uint8Array(e.target.result);
+        workbook = XLSX.read(data, { type: "array" });
+        fileName.textContent = file.name;
+        generateBtn.disabled = false;
+        statusEl.textContent = "File loaded. Ready to process.";
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function matchAttributes(text, attr, category) {
+      let rules;
+      if (attr === "subtype") {
+        rules = kw[category].subtype || [];
+      } else {
+        rules = kw.common[attr] || [];
+      }
+      let results = [];
+      rules.forEach(rule => {
+        if (rule.terms.some(term => new RegExp("\\b" + term + "\\b","i").test(text))) {
+          results.push(rule.value);
+        }
+      });
+      results = [...new Set(results)];
+      if (results.length === 0) results = [defaults[category][attr]];
+      if (attr === "subtype" && results.length > 3) results = results.slice(0,3);
+      if (attr === "application" && results.length > 7) results = results.slice(0,7);
+      if (attr === "gender" && results.length > 1) results = results.slice(0,1);
+      if (attr === "form" && results.length > 1) results = results.slice(0,1);
+      return results.join("|");
+    }
+
+    generateBtn.addEventListener("click", () => {
+      if (!workbook) return;
+      const category = document.getElementById("category").value;
+      const selected = [...document.querySelectorAll("input[type=checkbox]:checked")].map(cb => cb.value);
+      const wsName = workbook.SheetNames.find(n => n.toLowerCase() === "data");
+      if (!wsName) { statusEl.textContent = "No sheet named 'data' found."; return; }
+      const ws = workbook.Sheets[wsName];
+      const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+      if (!data.length) { statusEl.textContent = "Sheet is empty."; return; }
+
+      const headers = data[0];
+      while (headers.length < 9) headers.push("");
+      headers[8] = "";
+      const startCol = 9;
+
+      selected.forEach((attr, i) => {
+        headers[startCol + i] = attr.charAt(0).toUpperCase() + attr.slice(1);
+      });
+
+      for (let r=1; r<data.length; r++) {
+        const row = data[r];
+        const text = row.slice(1,8).join(" ").toLowerCase();
+        selected.forEach((attr, i) => {
+          row[startCol+i] = matchAttributes(text, attr, category);
+        });
+      }
+
+      const newWs = XLSX.utils.aoa_to_sheet(data);
+      workbook.Sheets[wsName] = newWs;
+
+      // Keep the same file type as uploaded
+      const wbout = XLSX.write(workbook, { bookType: uploadedExt === "xlsm" ? "xlsm" : "xlsx", type: "array" });
+      const blob = new Blob([wbout], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "FILLED_" + uploadedFileName + "." + uploadedExt;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      statusEl.textContent = "File generated and downloaded.";
+    });
+  </script>
+</body>
+</html>
