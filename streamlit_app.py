@@ -146,7 +146,7 @@ tab1, tab2, tab3 = st.tabs(["1) Upload Raw Data", "2) Upload Masterfile Template
 
 # Tab 1: Raw
 with tab1:
-    st.subheader("Upload Raw Data (CSV/XLSX)")
+    st.subheader("Upload Raw Data / PXM Export Report (CSV/XLSX)")
     raw_file = st.file_uploader("Raw file", type=["csv","xlsx"], key="raw_file")
     raw_sheet = None
     if raw_file is not None and raw_file.name.lower().endswith(".xlsx"):
