@@ -9,9 +9,8 @@ from openpyxl import load_workbook
 st.set_page_config(page_title="Masterfile Filler", layout="wide")
 
 # --- Header ---
-st.markdown("<h1 style='text-align: center;'>🧩 Masterfile Filler</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🧩 Target Masterfile Filler</h1>", unsafe_allow_html=True)
 st.markdown("<h4 style='text-align: center; font-style: italic;'>Innovating with AI Today ⏐ Leading Automation Tomorrow</h4>", unsafe_allow_html=True)
-st.caption("Only the FIRST sheet is modified. Row 1 = headers, Row 2 is preserved, data is written starting from Row 3. Other sheets remain unchanged (names, styles, formulas, merges).")
 
 # ---------- Helpers ----------
 def read_raw(uploaded_file, sheet: Optional[str]) -> pd.DataFrame:
@@ -143,7 +142,7 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     return out
 
 # ---------- UI (3 tabs) ----------
-tab1, tab2, tab3 = st.tabs(["1) Upload Raw Data", "2) Upload Masterfile (XLSX; FIRST sheet will be filled)", "3) Mapping (2 columns) & Download"])
+tab1, tab2, tab3 = st.tabs(["1) Upload Raw Data", "2) Upload Masterfile Template", "3) Mapping (2 columns) & Download"])
 
 # Tab 1: Raw
 with tab1:
@@ -165,7 +164,7 @@ with tab1:
 
 # Tab 2: Template
 with tab2:
-    st.subheader("Upload Masterfile (XLSX or XLSM)")
+    st.subheader("Upload Masterfile Template (XLSX or XLSM)")
     template_file = st.file_uploader("Masterfile (Excel .xlsx or .xlsm)", type=["xlsx","xlsm"], key="template_file")
     tpl_preview = None
     first_sheet_name = None
