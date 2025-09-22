@@ -3,7 +3,7 @@ import re
 from io import BytesIO
 import pandas as pd
 import streamlit as st
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
@@ -14,6 +14,19 @@ st.markdown("<h1 style='text-align: center;'>🧩 Target Masterfile Filler</h1>"
 st.markdown("<h4 style='text-align: center; font-style: italic;'>Innovating with AI Today ⏐ Leading Automation Tomorrow</h4>", unsafe_allow_html=True)
 
 # ---------- Helpers ----------
+def _norm_key(s: str) -> str:
+    """Normalize header names: lowercase + remove non-alphanumerics."""
+    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
+def list_excel_sheets(uploaded_file) -> List[str]:
+    if uploaded_file is None:
+        return []
+    try:
+        xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
+        return xls.sheet_names
+    except Exception:
+        return []
+
 def read_raw(uploaded_file, sheet: Optional[str]) -> pd.DataFrame:
     if uploaded_file is None:
         return pd.DataFrame()
@@ -32,29 +45,17 @@ def read_raw(uploaded_file, sheet: Optional[str]) -> pd.DataFrame:
         st.error(f"Failed to read RAW: {e}")
         return pd.DataFrame()
 
-def list_excel_sheets(uploaded_file) -> List[str]:
-    if uploaded_file is None:
-        return []
-    try:
-        xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
-        return xls.sheet_names
-    except Exception:
-        return []
-
-def _norm_key(s: str) -> str:
-    """Normalize a header for robust matching (case-insensitive, ignore non-alphanumerics)."""
-    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
-
 def read_two_col_mapping(uploaded_file) -> pd.DataFrame:
     """
     Expect exactly 2 columns in this order:
-      1) Template header (e.g., 'Template', 'Template Header', 'Header of Masterfile Template', 'Target', 'To')
-      2) Raw header (e.g., 'Raw', 'Raw Header', 'Header of Row Sheet', 'Source', 'From')
-    Returns a DataFrame with columns: ['raw_header', 'template_header'] used by the filler.
+      1) Template header  (e.g., 'Template', 'Template Header', 'Header of Masterfile Template', 'Target', 'To')
+      2) Raw header       (e.g., 'Raw', 'Raw Header', 'Header of Row Sheet', 'Source', 'From')
+    Output DataFrame columns: ['raw_header','template_header'] (used by writer).
     """
     if uploaded_file is None:
         return pd.DataFrame()
-    name = uploaded_file.name.lower()
+
+    name = getattr(uploaded_file, "name", "").lower()
     try:
         if name.endswith((".csv", ".txt")):
             m = pd.read_csv(uploaded_file)
@@ -66,14 +67,9 @@ def read_two_col_mapping(uploaded_file) -> pd.DataFrame:
     if m.empty:
         return m
 
-    # Detect columns by flexible names
     cols_norm = { _norm_key(c): c for c in m.columns }
-    template_keys = [_norm_key(x) for x in [
-        "Template", "Template Header", "Header of Masterfile Template", "Target", "To"
-    ]]
-    raw_keys = [_norm_key(x) for x in [
-        "Raw", "Raw Header", "Header of Row Sheet", "Source", "From"
-    ]]
+    template_keys = [_norm_key(x) for x in ["Template","Template Header","Header of Masterfile Template","Target","To"]]
+    raw_keys      = [_norm_key(x) for x in ["Raw","Raw Header","Header of Row Sheet","Source","From"]]
 
     tpl_col_name = next((cols_norm[k] for k in template_keys if k in cols_norm), None)
     raw_col_name = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
@@ -81,21 +77,17 @@ def read_two_col_mapping(uploaded_file) -> pd.DataFrame:
         st.error("Mapping must contain two columns: (1) Template header, (2) Raw header.")
         return pd.DataFrame()
 
-    # Normalize to the canonical order the filler expects
     out = m[[tpl_col_name, raw_col_name]].copy()
     out.columns = ["template_header", "raw_header"]
-    # Clean
     out["template_header"] = out["template_header"].astype(str).str.strip()
     out["raw_header"] = out["raw_header"].astype(str).str.strip()
     out = out[(out["template_header"] != "") & (out["raw_header"] != "")]
-    # Drop duplicate template targets (keep the first occurrence)
     out = out.drop_duplicates(subset=["template_header"]).reset_index(drop=True)
-    # Reorder to the names used by the writer
-    out = out[["raw_header", "template_header"]]
-    return out
+    # writer expects ['raw_header','template_header']
+    return out[["raw_header","template_header"]]
 
 def build_header_index_first_sheet(ws, header_row: int = 1) -> Dict[str, int]:
-    """Return a dict: normalized header -> column index for the FIRST sheet row 1 only."""
+    """Return normalized header -> column index for FIRST sheet (row 1)."""
     headers = {}
     max_col = ws.max_column or 1
     for c in range(1, max_col + 1):
@@ -109,21 +101,16 @@ def build_header_index_first_sheet(ws, header_row: int = 1) -> Dict[str, int]:
 
 def _highlight_duplicates(ws, header_map: Dict[str, int], header_labels: List[str], start_row: int = 3):
     """
-    For each header in header_labels, find the column by header text (robust match)
-    and highlight duplicate cells (yellow) from start_row to the last non-empty row.
+    For each header in header_labels, locate the column and highlight duplicate cells (yellow)
+    from start_row to the last non-empty row. Case-insensitive, ignores blanks.
     """
     dup_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-
-    # Build normalized-to-col map for robust lookup
-    norm_to_col = header_map  # already normalized by build_header_index_first_sheet
-
     for hdr in header_labels:
         key = _norm_key(hdr)
-        col_idx = norm_to_col.get(key)
+        col_idx = header_map.get(key)
         if not col_idx:
-            continue  # header not found; skip gracefully
+            continue  # header not found; skip
 
-        # Pass 1: count occurrences (case-insensitive for safety), non-empty values only
         counts = {}
         max_row = ws.max_row or start_row
         for r in range(start_row, max_row + 1):
@@ -133,11 +120,9 @@ def _highlight_duplicates(ws, header_map: Dict[str, int], header_labels: List[st
             s = str(v).strip()
             if not s:
                 continue
-            # normalize for comparison: uppercase to treat case-insensitively
             k = s.upper()
             counts[k] = counts.get(k, 0) + 1
 
-        # Pass 2: highlight cells with duplicate values
         if counts:
             for r in range(start_row, max_row + 1):
                 v = ws.cell(row=r, column=col_idx).value
@@ -146,29 +131,28 @@ def _highlight_duplicates(ws, header_map: Dict[str, int], header_labels: List[st
                 s = str(v).strip()
                 if not s:
                     continue
-                k = s.upper()
-                if counts.get(k, 0) > 1:
+                if counts.get(s.upper(), 0) > 1:
                     ws.cell(row=r, column=col_idx).fill = dup_fill
 
 def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFrame, raw_df: pd.DataFrame, template_filename: str) -> BytesIO:
     """
     Write values ONLY on the first sheet using headers in row 1 (normalized match).
-    Start writing from row 3. Other sheets remain untouched (names, formatting, formulas, merges).
-    After filling, highlight duplicates in 'Partner SKU' and 'Barcode' columns.
+    Start writing from row 3. After filling, highlight duplicates in 'Partner SKU' and 'Barcode'.
+    Other sheets remain untouched (names, formatting, formulas, merges).
     """
     keep_vba = template_filename.lower().endswith(".xlsm")
     wb = load_workbook(filename=template_bytes, data_only=False, keep_vba=keep_vba)
     ws = wb.worksheets[0]  # FIRST sheet only
 
-    # Build header index from row 1 (normalized)
+    # Header index
     tpl_header_to_col = build_header_index_first_sheet(ws, header_row=1)
     if not tpl_header_to_col:
         raise ValueError("No headers found in row 1 of the first sheet. Please ensure row 1 contains headers.")
 
-    # Map raw columns by lowercase literal (do not normalize away punctuation here)
+    # Raw column lookup (literal lowercase)
     raw_norm = {c.strip().lower(): c for c in raw_df.columns}
 
-    # Build mapping pairs: (raw_col_name, target_col_idx)
+    # Build mapping pairs
     pairs = []
     missing_raw, missing_tpl = [], []
     for _, r in mapping_df.iterrows():
@@ -177,11 +161,9 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
         raw_col_name = raw_norm.get(raw_hdr_lc)
         col_idx = tpl_header_to_col.get(tpl_hdr_norm)
         if raw_col_name is None:
-            missing_raw.append(r["raw_header"])
-            continue
+            missing_raw.append(r["raw_header"]); continue
         if col_idx is None:
-            missing_tpl.append(r["template_header"])
-            continue
+            missing_tpl.append(r["template_header"]); continue
         pairs.append((raw_col_name, col_idx))
 
     if missing_tpl:
@@ -189,7 +171,7 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     if missing_raw:
         st.warning("RAW columns missing (skipped): " + ", ".join(sorted(set(missing_raw))))
 
-    # Write starting from row 3
+    # Write rows from row 3
     start_row = 3
     for i, (_, raw_row) in enumerate(raw_df.iterrows()):
         out_row = start_row + i
@@ -197,7 +179,7 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
             val = raw_row[raw_col_name]
             ws.cell(row=out_row, column=col_idx, value=("" if pd.isna(val) else val))
 
-    # Highlight duplicates in required columns
+    # Highlight duplicates in specific columns
     _highlight_duplicates(ws, tpl_header_to_col, header_labels=["Partner SKU", "Barcode"], start_row=start_row)
 
     # Save to bytes
@@ -206,12 +188,40 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     out.seek(0)
     return out
 
-# ---------- UI (3 tabs) ----------
-tab1, tab2, tab3 = st.tabs(["1) Upload Raw Data", "2) Upload Masterfile Template", "3) Mapping (2 columns) & Download"])
+# ---------- SESSION ----------
+if "template_bytes" not in st.session_state:
+    st.session_state.template_bytes = None
+if "template_name" not in st.session_state:
+    st.session_state.template_name = None
+if "raw_df" not in st.session_state:
+    st.session_state.raw_df = pd.DataFrame()
 
-# Tab 1: Raw
+# ---------- UI (tabs in requested order) ----------
+tab1, tab2, tab3 = st.tabs([
+    "1) Upload Masterfile Template",
+    "2) Upload Raw Data",
+    "3) Upload Mapping & Download"
+])
+
+# Tab 1: Template
 with tab1:
-    st.subheader("Upload Raw Data / PXM Export Report (CSV/XLSX)")
+    st.subheader("Upload Masterfile Template (XLSX or XLSM)")
+    template_file = st.file_uploader("Masterfile (Excel .xlsx or .xlsm)", type=["xlsx","xlsm"], key="template_file")
+    if template_file is not None:
+        st.session_state.template_bytes = BytesIO(template_file.getbuffer())
+        st.session_state.template_name = template_file.name
+        try:
+            xls = pd.ExcelFile(template_file, engine="openpyxl")
+            first_sheet_name = xls.sheet_names[0]
+            tpl_preview = pd.read_excel(xls, sheet_name=first_sheet_name, nrows=5, engine="openpyxl")
+            st.info(f"Only the FIRST sheet will be modified: **{first_sheet_name}** (Row 3 onward).")
+            st.dataframe(tpl_preview, use_container_width=True)
+        except Exception as e:
+            st.error(f"Failed to read template for preview: {e}")
+
+# Tab 2: Raw
+with tab2:
+    st.subheader("Upload Raw Data (CSV/XLSX)")
     raw_file = st.file_uploader("Raw file", type=["csv","xlsx"], key="raw_file")
     raw_sheet = None
     if raw_file is not None and raw_file.name.lower().endswith(".xlsx"):
@@ -224,100 +234,64 @@ with tab1:
 
     raw_df = read_raw(raw_file, raw_sheet)
     if not raw_df.empty:
+        st.session_state.raw_df = raw_df
         st.success(f"Loaded RAW: {len(raw_df):,} rows × {len(raw_df.columns):,} columns.")
         st.dataframe(raw_df.head(50), use_container_width=True)
 
-# Tab 2: Template
-with tab2:
-    st.subheader("Upload Masterfile Template (XLSX or XLSM)")
-    template_file = st.file_uploader("Masterfile (Excel .xlsx or .xlsm)", type=["xlsx","xlsm"], key="template_file")
-    tpl_preview = None
-    first_sheet_name = None
-    if template_file is not None:
-        try:
-            xls = pd.ExcelFile(template_file, engine="openpyxl")
-            first_sheet_name = xls.sheet_names[0]
-            tpl_preview = pd.read_excel(xls, sheet_name=first_sheet_name, nrows=5, engine="openpyxl")
-            st.info(f"Only the FIRST sheet will be modified: **{first_sheet_name}**")
-            st.dataframe(tpl_preview, use_container_width=True)
-        except Exception as e:
-            st.error(f"Failed to read template for preview: {e}")
-
 # Tab 3: Mapping + Process
 with tab3:
-    st.subheader("Upload 2-column mapping (XLSX/CSV)")
+    st.subheader("Upload 2-column mapping (Template, Raw) & Generate")
     st.markdown(
-        "Columns required (in this order):\n"
-        "- **Template** (first column): header text in the template's FIRST sheet (row 1)\n"
-        "- **Raw** (second column): column name in your raw file\n\n"
-        "The app will copy **Raw → Template**."
+        "Columns required (in this order):  \n"
+        "- **Template** (first column): header text in the template's FIRST sheet (row 1)  \n"
+        "- **Raw** (second column): column name in your raw file  \n\n"
+        "The app will copy **Raw → Template** and then highlight duplicates in **Partner SKU** and **Barcode**."
     )
-    mapping_file = st.file_uploader("Mapping file", type=["xlsx","csv"], key="mapping_file")
+    mapping_file = st.file_uploader("Mapping file (XLSX/CSV)", type=["xlsx","csv"], key="mapping_file")
 
-    # Direct download button for mapping template
+    # Mapping template download
     def mapping_template_bytes():
         df = pd.DataFrame({
-            "Template": ["SKU", "Title", "Description", "Price", "Quantity", "Category"],
-            "Raw":      ["sku", "name",  "description", "price", "qty",     "category"],
+            "Template": ["SKU","Title","Description","Price","Quantity","Category"],
+            "Raw":      ["sku","name","description","price","qty","category"],
         })
         out = BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as w:
             df.to_excel(w, index=False, sheet_name="mapping")
-        out.seek(0)
-        return out
+        out.seek(0); return out
 
-    st.download_button("⬇️ Download mapping_template.xlsx", data=mapping_template_bytes().getvalue(), file_name="mapping_template.xlsx")
+    st.download_button("⬇️ Download mapping_template.xlsx",
+                       data=mapping_template_bytes().getvalue(),
+                       file_name="mapping_template.xlsx")
 
-    # Process & Download
-    can_process = True
-    if (mapping_file is None) or (template_file is None) or raw_df.empty:
-        can_process = False
-        st.info("Upload RAW, Template, and Mapping to enable processing.")
+    can_process = (
+        st.session_state.template_bytes is not None
+        and st.session_state.template_name is not None
+        and not st.session_state.raw_df.empty
+        and mapping_file is not None
+    )
+    if not can_process:
+        st.info("Please upload Template (Tab 1), Raw (Tab 2), and Mapping (Tab 3) to enable processing.")
 
     if st.button("⚙️ Process & Download", type="primary", disabled=not can_process):
         try:
-            # Read mapping (Template first, Raw second)
-            if mapping_file.name.lower().endswith(".csv"):
-                mapping_df_in = pd.read_csv(mapping_file)
+            # Read mapping directly from UploadedFile (avoid BytesIO -> no .name error)
+            mapping_df = read_two_col_mapping(mapping_file)
+            if mapping_df.empty:
+                st.error("Mapping is empty or invalid.")
             else:
-                mapping_df_in = pd.read_excel(mapping_file, engine="openpyxl")
-
-            # Normalize mapping to ['raw_header','template_header']
-            mapping_df = read_two_col_mapping(io.BytesIO(mapping_file.getbuffer()) if hasattr(mapping_file, "getbuffer") else mapping_file)
-            # Fallback if read_two_col_mapping couldn't re-open stream (CSV path), use in-memory df
-            if mapping_df is None or mapping_df.empty:
-                # Do inline normalize
-                cols_norm = {_norm_key(c): c for c in mapping_df_in.columns}
-                template_keys = [_norm_key(x) for x in ["Template","Template Header","Header of Masterfile Template","Target","To"]]
-                raw_keys      = [_norm_key(x) for x in ["Raw","Raw Header","Header of Row Sheet","Source","From"]]
-                tpl_col_name  = next((cols_norm[k] for k in template_keys if k in cols_norm), None)
-                raw_col_name  = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
-                if not tpl_col_name or not raw_col_name:
-                    raise ValueError("Mapping must have two columns: Template (col 1) and Raw (col 2).")
-                mapping_df = mapping_df_in[[tpl_col_name, raw_col_name]].copy()
-                mapping_df.columns = ["template_header", "raw_header"]
-                mapping_df = mapping_df[(mapping_df["template_header"].astype(str).str.strip() != "") &
-                                        (mapping_df["raw_header"].astype(str).str.strip() != "")]
-                mapping_df = mapping_df.drop_duplicates(subset=["template_header"]).reset_index(drop=True)
-                mapping_df = mapping_df[["raw_header","template_header"]]
-
-            # Read template bytes
-            tpl_bytes = BytesIO(template_file.getbuffer())
-
-            # Fill + highlight
-            out_bytes = fill_first_sheet_by_headers(
-                template_bytes=tpl_bytes,
-                mapping_df=mapping_df,
-                raw_df=raw_df,
-                template_filename=template_file.name
-            )
-
-            st.success("Done! Your updated masterfile is ready. Duplicate Partner SKU / Barcode cells are highlighted.")
-            st.download_button(
-                label="⬇️ Download Updated Masterfile (Excel)",
-                data=out_bytes.getvalue(),
-                file_name="filled_masterfile.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                out_bytes = fill_first_sheet_by_headers(
+                    template_bytes=BytesIO(st.session_state.template_bytes.getbuffer()),
+                    mapping_df=mapping_df,
+                    raw_df=st.session_state.raw_df,
+                    template_filename=st.session_state.template_name
+                )
+                st.success("Done! Your updated masterfile is ready. Duplicate Partner SKU / Barcode cells are highlighted.")
+                st.download_button(
+                    label="⬇️ Download Updated Masterfile (Excel)",
+                    data=out_bytes.getvalue(),
+                    file_name="filled_masterfile.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
         except Exception as e:
             st.exception(e)
