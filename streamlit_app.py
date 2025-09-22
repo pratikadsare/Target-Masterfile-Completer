@@ -273,7 +273,7 @@ with tab3:
     if not can_process:
         st.info("Please upload Template (Tab 1), Raw (Tab 2), and Mapping (Tab 3) to enable processing.")
 
-    if st.button("⚙️ Process & Download", type="primary", disabled=not can_process):
+    if st.button("⚙️ Process the Data", type="primary", disabled=not can_process):
         try:
             # Read mapping directly from UploadedFile (avoid BytesIO -> no .name error)
             mapping_df = read_two_col_mapping(mapping_file)
