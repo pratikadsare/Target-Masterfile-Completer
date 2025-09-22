@@ -1,10 +1,11 @@
-
 import io
+import re
 from io import BytesIO
 import pandas as pd
 import streamlit as st
 from typing import List, Dict, Tuple, Optional
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="Masterfile Filler", layout="wide")
 
@@ -40,10 +41,16 @@ def list_excel_sheets(uploaded_file) -> List[str]:
     except Exception:
         return []
 
+def _norm_key(s: str) -> str:
+    """Normalize a header for robust matching (case-insensitive, ignore non-alphanumerics)."""
+    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
 def read_two_col_mapping(uploaded_file) -> pd.DataFrame:
-    """Expect exactly 2 columns:
-       - 'header of row sheet' (or 'header of raw sheet')
-       - 'header of masterfile template'
+    """
+    Expect exactly 2 columns in this order:
+      1) Template header (e.g., 'Template', 'Template Header', 'Header of Masterfile Template', 'Target', 'To')
+      2) Raw header (e.g., 'Raw', 'Raw Header', 'Header of Row Sheet', 'Source', 'From')
+    Returns a DataFrame with columns: ['raw_header', 'template_header'] used by the filler.
     """
     if uploaded_file is None:
         return pd.DataFrame()
@@ -60,60 +67,115 @@ def read_two_col_mapping(uploaded_file) -> pd.DataFrame:
         return m
 
     # Detect columns by flexible names
-    cols_norm = {c.strip().lower(): c for c in m.columns}
-    raw_keys = ["header of row sheet", "header of raw sheet", "raw header", "raw", "source"]
-    tpl_keys = ["header of masterfile template", "template header", "masterfile header", "template", "target"]
+    cols_norm = { _norm_key(c): c for c in m.columns }
+    template_keys = [_norm_key(x) for x in [
+        "Template", "Template Header", "Header of Masterfile Template", "Target", "To"
+    ]]
+    raw_keys = [_norm_key(x) for x in [
+        "Raw", "Raw Header", "Header of Row Sheet", "Source", "From"
+    ]]
 
-    raw_col = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
-    tpl_col = next((cols_norm[k] for k in tpl_keys if k in cols_norm), None)
-    if not raw_col or not tpl_col:
-        st.error("Mapping must contain two columns: 'header of row sheet' and 'header of masterfile template'.")
+    tpl_col_name = next((cols_norm[k] for k in template_keys if k in cols_norm), None)
+    raw_col_name = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
+    if not tpl_col_name or not raw_col_name:
+        st.error("Mapping must contain two columns: (1) Template header, (2) Raw header.")
         return pd.DataFrame()
 
-    m = m[[raw_col, tpl_col]].copy()
-    m.columns = ["raw_header", "template_header"]
-    m["raw_header"] = m["raw_header"].astype(str).str.strip()
-    m["template_header"] = m["template_header"].astype(str).str.strip()
-    m = m[(m["raw_header"] != "") & (m["template_header"] != "")].drop_duplicates(subset=["template_header"])
-    return m.reset_index(drop=True)
+    # Normalize to the canonical order the filler expects
+    out = m[[tpl_col_name, raw_col_name]].copy()
+    out.columns = ["template_header", "raw_header"]
+    # Clean
+    out["template_header"] = out["template_header"].astype(str).str.strip()
+    out["raw_header"] = out["raw_header"].astype(str).str.strip()
+    out = out[(out["template_header"] != "") & (out["raw_header"] != "")]
+    # Drop duplicate template targets (keep the first occurrence)
+    out = out.drop_duplicates(subset=["template_header"]).reset_index(drop=True)
+    # Reorder to the names used by the writer
+    out = out[["raw_header", "template_header"]]
+    return out
 
 def build_header_index_first_sheet(ws, header_row: int = 1) -> Dict[str, int]:
-    """Return a dict normalized header -> column index for the FIRST sheet row1 only."""
+    """Return a dict: normalized header -> column index for the FIRST sheet row 1 only."""
     headers = {}
     max_col = ws.max_column or 1
     for c in range(1, max_col + 1):
         v = ws.cell(row=header_row, column=c).value
         if v is None:
             continue
-        key = str(v).strip().lower()
+        key = _norm_key(v)
         if key and key not in headers:
             headers[key] = c
     return headers
 
+def _highlight_duplicates(ws, header_map: Dict[str, int], header_labels: List[str], start_row: int = 3):
+    """
+    For each header in header_labels, find the column by header text (robust match)
+    and highlight duplicate cells (yellow) from start_row to the last non-empty row.
+    """
+    dup_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
+    # Build normalized-to-col map for robust lookup
+    norm_to_col = header_map  # already normalized by build_header_index_first_sheet
+
+    for hdr in header_labels:
+        key = _norm_key(hdr)
+        col_idx = norm_to_col.get(key)
+        if not col_idx:
+            continue  # header not found; skip gracefully
+
+        # Pass 1: count occurrences (case-insensitive for safety), non-empty values only
+        counts = {}
+        max_row = ws.max_row or start_row
+        for r in range(start_row, max_row + 1):
+            v = ws.cell(row=r, column=col_idx).value
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            # normalize for comparison: uppercase to treat case-insensitively
+            k = s.upper()
+            counts[k] = counts.get(k, 0) + 1
+
+        # Pass 2: highlight cells with duplicate values
+        if counts:
+            for r in range(start_row, max_row + 1):
+                v = ws.cell(row=r, column=col_idx).value
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if not s:
+                    continue
+                k = s.upper()
+                if counts.get(k, 0) > 1:
+                    ws.cell(row=r, column=col_idx).fill = dup_fill
+
 def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFrame, raw_df: pd.DataFrame, template_filename: str) -> BytesIO:
-    """Write values ONLY on the first sheet using headers in row 1. Start writing from row 3.
-       Other sheets remain untouched (names, formatting, formulas, merges).
+    """
+    Write values ONLY on the first sheet using headers in row 1 (normalized match).
+    Start writing from row 3. Other sheets remain untouched (names, formatting, formulas, merges).
+    After filling, highlight duplicates in 'Partner SKU' and 'Barcode' columns.
     """
     keep_vba = template_filename.lower().endswith(".xlsm")
     wb = load_workbook(filename=template_bytes, data_only=False, keep_vba=keep_vba)
     ws = wb.worksheets[0]  # FIRST sheet only
 
-    # Build header index from row 1
+    # Build header index from row 1 (normalized)
     tpl_header_to_col = build_header_index_first_sheet(ws, header_row=1)
     if not tpl_header_to_col:
         raise ValueError("No headers found in row 1 of the first sheet. Please ensure row 1 contains headers.")
 
-    # Map raw columns by lowercase
+    # Map raw columns by lowercase literal (do not normalize away punctuation here)
     raw_norm = {c.strip().lower(): c for c in raw_df.columns}
 
     # Build mapping pairs: (raw_col_name, target_col_idx)
     pairs = []
     missing_raw, missing_tpl = [], []
     for _, r in mapping_df.iterrows():
-        raw_hdr = r["raw_header"].strip().lower()
-        tpl_hdr = r["template_header"].strip().lower()
-        raw_col_name = raw_norm.get(raw_hdr)
-        col_idx = tpl_header_to_col.get(tpl_hdr)
+        raw_hdr_lc = r["raw_header"].strip().lower()
+        tpl_hdr_norm = _norm_key(r["template_header"])
+        raw_col_name = raw_norm.get(raw_hdr_lc)
+        col_idx = tpl_header_to_col.get(tpl_hdr_norm)
         if raw_col_name is None:
             missing_raw.append(r["raw_header"])
             continue
@@ -134,6 +196,9 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
         for raw_col_name, col_idx in pairs:
             val = raw_row[raw_col_name]
             ws.cell(row=out_row, column=col_idx, value=("" if pd.isna(val) else val))
+
+    # Highlight duplicates in required columns
+    _highlight_duplicates(ws, tpl_header_to_col, header_labels=["Partner SKU", "Barcode"], start_row=start_row)
 
     # Save to bytes
     out = BytesIO()
@@ -181,14 +246,19 @@ with tab2:
 # Tab 3: Mapping + Process
 with tab3:
     st.subheader("Upload 2-column mapping (XLSX/CSV)")
-    st.markdown("Columns required: **header of row sheet** (RAW) → **header of masterfile template** (FIRST sheet, row 1).")
+    st.markdown(
+        "Columns required (in this order):\n"
+        "- **Template** (first column): header text in the template's FIRST sheet (row 1)\n"
+        "- **Raw** (second column): column name in your raw file\n\n"
+        "The app will copy **Raw → Template**."
+    )
     mapping_file = st.file_uploader("Mapping file", type=["xlsx","csv"], key="mapping_file")
 
     # Direct download button for mapping template
     def mapping_template_bytes():
         df = pd.DataFrame({
-            "header of row sheet": ["sku","name","description","price","qty","category"],
-            "header of masterfile template": ["SKU","Title","Description","Price","Quantity","Category"]
+            "Template": ["SKU", "Title", "Description", "Price", "Quantity", "Category"],
+            "Raw":      ["sku", "name",  "description", "price", "qty",     "category"],
         })
         out = BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as w:
@@ -206,32 +276,35 @@ with tab3:
 
     if st.button("⚙️ Process & Download", type="primary", disabled=not can_process):
         try:
-            # Read mapping
+            # Read mapping (Template first, Raw second)
             if mapping_file.name.lower().endswith(".csv"):
-                mapping_df = pd.read_csv(mapping_file)
+                mapping_df_in = pd.read_csv(mapping_file)
             else:
-                mapping_df = pd.read_excel(mapping_file, engine="openpyxl")
-            # Normalize mapping
-            def normalize_mapping(df):
-                cols_norm = {c.strip().lower(): c for c in df.columns}
-                raw_keys = ["header of row sheet", "header of raw sheet", "raw header", "raw", "source"]
-                tpl_keys = ["header of masterfile template", "template header", "masterfile header", "template", "target"]
-                raw_col = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
-                tpl_col = next((cols_norm[k] for k in tpl_keys if k in cols_norm), None)
-                if not raw_col or not tpl_col:
-                    raise ValueError("Mapping must have 'header of row sheet' and 'header of masterfile template'.")
-                out = df[[raw_col, tpl_col]].copy()
-                out.columns = ["raw_header", "template_header"]
-                out["raw_header"] = out["raw_header"].astype(str).str.strip()
-                out["template_header"] = out["template_header"].astype(str).str.strip()
-                out = out[(out["raw_header"] != "") & (out["template_header"] != "")].drop_duplicates(subset=["template_header"])
-                return out.reset_index(drop=True)
-            mapping_df = normalize_mapping(mapping_df)
+                mapping_df_in = pd.read_excel(mapping_file, engine="openpyxl")
+
+            # Normalize mapping to ['raw_header','template_header']
+            mapping_df = read_two_col_mapping(io.BytesIO(mapping_file.getbuffer()) if hasattr(mapping_file, "getbuffer") else mapping_file)
+            # Fallback if read_two_col_mapping couldn't re-open stream (CSV path), use in-memory df
+            if mapping_df is None or mapping_df.empty:
+                # Do inline normalize
+                cols_norm = {_norm_key(c): c for c in mapping_df_in.columns}
+                template_keys = [_norm_key(x) for x in ["Template","Template Header","Header of Masterfile Template","Target","To"]]
+                raw_keys      = [_norm_key(x) for x in ["Raw","Raw Header","Header of Row Sheet","Source","From"]]
+                tpl_col_name  = next((cols_norm[k] for k in template_keys if k in cols_norm), None)
+                raw_col_name  = next((cols_norm[k] for k in raw_keys if k in cols_norm), None)
+                if not tpl_col_name or not raw_col_name:
+                    raise ValueError("Mapping must have two columns: Template (col 1) and Raw (col 2).")
+                mapping_df = mapping_df_in[[tpl_col_name, raw_col_name]].copy()
+                mapping_df.columns = ["template_header", "raw_header"]
+                mapping_df = mapping_df[(mapping_df["template_header"].astype(str).str.strip() != "") &
+                                        (mapping_df["raw_header"].astype(str).str.strip() != "")]
+                mapping_df = mapping_df.drop_duplicates(subset=["template_header"]).reset_index(drop=True)
+                mapping_df = mapping_df[["raw_header","template_header"]]
 
             # Read template bytes
             tpl_bytes = BytesIO(template_file.getbuffer())
 
-            # Fill
+            # Fill + highlight
             out_bytes = fill_first_sheet_by_headers(
                 template_bytes=tpl_bytes,
                 mapping_df=mapping_df,
@@ -239,7 +312,7 @@ with tab3:
                 template_filename=template_file.name
             )
 
-            st.success("Done! Your updated masterfile is ready.")
+            st.success("Done! Your updated masterfile is ready. Duplicate Partner SKU / Barcode cells are highlighted.")
             st.download_button(
                 label="⬇️ Download Updated Masterfile (Excel)",
                 data=out_bytes.getvalue(),
